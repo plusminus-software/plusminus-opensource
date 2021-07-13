@@ -5,13 +5,13 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>software.plusminus</groupId>
-    <artifactId>plusminus-parent-public</artifactId>
+    <artifactId>plusminus-opensource</artifactId>
     <version>1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
-    <name>Plusminus Parent</name>
-    <description>Maven parent POM for plusminus projects</description>
-    <url>https://github.com/plusminus-software/plusminus-parent-public</url>
+    <name>Plusminus Opensource</name>
+    <description>Parent POM for public (opensource) plusminus-software's projects with configured deploying to Sonatype and Maven Central</description>
+    <url>https://github.com/plusminus-software/plusminus-opensource</url>
 
     <licenses>
         <license>
@@ -34,9 +34,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git://github.com/plusminus-software/plusminus-parent-public.git</connection>
-        <developerConnection>scm:git:ssh://github.com:plusminus-software/plusminus-parent-public.git</developerConnection>
-        <url>https://github.com/plusminus-software/plusminus-parent-public/tree/main</url>
+        <connection>scm:git:git://github.com/plusminus-software/plusminus-opensource.git</connection>
+        <developerConnection>scm:git:ssh://github.com:plusminus-software/plusminus-opensource.git</developerConnection>
+        <url>https://github.com/plusminus-software/plusminus-opensource/tree/main</url>
     </scm>
     
     <parent>
