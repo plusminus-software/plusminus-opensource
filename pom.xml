@@ -37,12 +37,13 @@
         <connection>scm:git:git://github.com/plusminus-software/plusminus-parent-public.git</connection>
         <developerConnection>scm:git:ssh://github.com:plusminus-software/plusminus-parent-public.git</developerConnection>
         <url>https://github.com/plusminus-software/plusminus-parent-public/tree/main</url>
+        <tag>HEAD</tag>
     </scm>
     
     <parent>
         <groupId>software.plusminus</groupId>
         <artifactId>plusminus-parent</artifactId>
-        <version>1.2</version>
+        <version>1.4</version>
         <relativePath/>
     </parent>
 
