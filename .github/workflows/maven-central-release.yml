@@ -1,0 +1,71 @@
+name: Maven Central Release
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        required: false
+        type: string
+        default: "21"
+
+    secrets:
+      MAVEN_CENTRAL_USERNAME:
+        required: true
+      MAVEN_CENTRAL_PASSWORD:
+        required: true
+      GPG_PRIVATE_KEY:
+        required: true
+      GPG_PASSPHRASE:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - name: Configure Maven credentials
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>central</id>
+                <username>${{ secrets.MAVEN_CENTRAL_USERNAME }}</username>
+                <password>${{ secrets.MAVEN_CENTRAL_PASSWORD }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Build
+        run: mvn -B -ntp clean verify
+
+      - name: Sign artifacts
+        run: |
+          mvn org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
+            -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
+            -Dgpg.pinentry.mode=loopback
+
+      - name: Publish to Maven Central
+        run: |
+          mvn org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
+            -DpublishingServerId=central \
+            -DautoPublish=true \
+            -DwaitUntil=published
