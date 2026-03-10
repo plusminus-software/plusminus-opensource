@@ -57,10 +57,8 @@ jobs:
           echo "Project version: $VERSION"
 
           if [[ "$VERSION" == *-SNAPSHOT ]]; then
-            echo "Snapshot version detected"
             echo "is_snapshot=true" >> $GITHUB_OUTPUT
           else
-            echo "Release version detected"
             echo "is_snapshot=false" >> $GITHUB_OUTPUT
           fi
 
@@ -71,11 +69,19 @@ jobs:
           mvn -B -ntp clean deploy \
             -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/
 
-      # RELEASE build
-      - name: Build Release
+      - name: Import GPG key
         if: steps.version.outputs.is_snapshot == 'false'
         run: |
-          mvn -B -ntp clean package
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      # RELEASE build + sign
+      - name: Build and Sign Release
+        if: steps.version.outputs.is_snapshot == 'false'
+        run: |
+          mvn -B -ntp clean verify \
+            org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
+            -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
+            -Dgpg.pinentry.mode=loopback
 
       # RELEASE publish
       - name: Publish release to Maven Central
@@ -83,7 +89,5 @@ jobs:
         run: |
           mvn -B -ntp org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
             -DpublishingServerId=central \
-            -DgpgKey="${{ secrets.GPG_PRIVATE_KEY }}" \
-            -DgpgPassphrase="${{ secrets.GPG_PASSPHRASE }}" \
             -DautoPublish=true \
             -DwaitUntil=published
