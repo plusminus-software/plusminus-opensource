@@ -35,10 +35,6 @@ jobs:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
 
-      - name: Import GPG key
-        run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-
       - name: Configure Maven credentials
         run: |
           mkdir -p ~/.m2
@@ -69,23 +65,17 @@ jobs:
           fi
 
       # SNAPSHOT deployment
-      - name: Build, Sign and Deploy SNAPSHOT
+      - name: Deploy SNAPSHOT
         if: steps.version.outputs.is_snapshot == 'true'
         run: |
           mvn -B -ntp clean deploy \
-            org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
-            -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
-            -Dgpg.pinentry.mode=loopback \
             -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/
 
-      # RELEASE build + sign
-      - name: Build and Sign Release
+      # RELEASE build
+      - name: Build Release
         if: steps.version.outputs.is_snapshot == 'false'
         run: |
-          mvn -B -ntp clean package \
-            org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
-            -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
-            -Dgpg.pinentry.mode=loopback
+          mvn -B -ntp clean package
 
       # RELEASE publish
       - name: Publish release to Maven Central
@@ -93,5 +83,7 @@ jobs:
         run: |
           mvn -B -ntp org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
             -DpublishingServerId=central \
+            -DgpgKey="${{ secrets.GPG_PRIVATE_KEY }}" \
+            -DgpgPassphrase="${{ secrets.GPG_PASSPHRASE }}" \
             -DautoPublish=true \
             -DwaitUntil=published
