@@ -54,13 +54,35 @@ jobs:
           </settings>
           EOF
 
-      - name: Build, Sign and Publish
+      - name: Detect version and repository
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "Project version: $VERSION"
+
+          if [[ "$VERSION" == *-SNAPSHOT ]]; then
+            REPO_URL=https://central.sonatype.com/repository/maven-snapshots/
+            echo "Snapshot version detected, using $REPO_URL"
+            echo "is_snapshot=true" >> $GITHUB_OUTPUT
+          else
+            REPO_URL=https://central.sonatype.com/repository/maven-releases/
+            echo "Release version detected, using $REPO_URL"
+            echo "is_snapshot=false" >> $GITHUB_OUTPUT
+          fi
+          echo "repo_url=$REPO_URL" >> $GITHUB_OUTPUT
+
+      - name: Build, Sign and Deploy
         run: |
           mvn -B -ntp clean deploy \
             org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
-            org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
             -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
             -Dgpg.pinentry.mode=loopback \
+            -DaltDeploymentRepository=central::default::${{ steps.version.outputs.repo_url }}
+
+      - name: Publish release to Maven Central
+        if: steps.version.outputs.is_snapshot == 'false'
+        run: |
+          mvn org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
             -DpublishingServerId=central \
             -DautoPublish=true \
             -DwaitUntil=published
