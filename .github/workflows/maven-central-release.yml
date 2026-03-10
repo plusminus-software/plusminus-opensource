@@ -54,18 +54,13 @@ jobs:
           </settings>
           EOF
 
-      - name: Build
-        run: mvn -B -ntp clean verify
-
-      - name: Sign artifacts
+      - name: Build, Sign and Publish
         run: |
-          mvn org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
+          mvn -B -ntp clean deploy \
+            org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
+            org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
             -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
-            -Dgpg.pinentry.mode=loopback
-
-      - name: Publish to Maven Central
-        run: |
-          mvn org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
+            -Dgpg.pinentry.mode=loopback \
             -DpublishingServerId=central \
             -DautoPublish=true \
             -DwaitUntil=published
