@@ -1,5 +1,4 @@
 name: Maven Central Release
-
 on:
   workflow_call:
     inputs:
@@ -7,7 +6,6 @@ on:
         required: false
         type: string
         default: "21"
-
     secrets:
       MAVEN_CENTRAL_USERNAME:
         required: true
@@ -21,10 +19,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,7 +31,11 @@ jobs:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
 
-      - name: Configure Maven credentials
+      - name: Import GPG Key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - name: Configure Maven settings
         run: |
           mkdir -p ~/.m2
           cat > ~/.m2/settings.xml <<EOF
@@ -47,6 +47,36 @@ jobs:
                 <password>${{ secrets.MAVEN_CENTRAL_PASSWORD }}</password>
               </server>
             </servers>
+            <profiles>
+              <profile>
+                <id>ci-gpg</id>
+                <build>
+                  <plugins>
+                    <plugin>
+                      <groupId>org.apache.maven.plugins</groupId>
+                      <artifactId>maven-gpg-plugin</artifactId>
+                      <version>3.2.4</version>
+                      <executions>
+                        <execution>
+                          <id>sign-artifacts</id>
+                          <phase>verify</phase>
+                          <goals>
+                            <goal>sign</goal>
+                          </goals>
+                        </execution>
+                      </executions>
+                      <configuration>
+                        <gpgArguments>
+                          <arg>--pinentry-mode</arg>
+                          <arg>loopback</arg>
+                        </gpgArguments>
+                        <passphrase>${{ secrets.GPG_PASSPHRASE }}</passphrase>
+                      </configuration>
+                    </plugin>
+                  </plugins>
+                </build>
+              </profile>
+            </profiles>
           </settings>
           EOF
 
@@ -55,39 +85,23 @@ jobs:
         run: |
           VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout | tr -d '[:space:]')
           echo "Project version: $VERSION"
-
           if [[ "$VERSION" == *-SNAPSHOT ]]; then
             echo "is_snapshot=true" >> $GITHUB_OUTPUT
           else
             echo "is_snapshot=false" >> $GITHUB_OUTPUT
           fi
 
-      # SNAPSHOT deployment
       - name: Deploy SNAPSHOT
         if: steps.version.outputs.is_snapshot == 'true'
         run: |
           mvn -B -ntp clean deploy \
             -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/
 
-      - name: Import GPG key
+      - name: Publish Release
         if: steps.version.outputs.is_snapshot == 'false'
         run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-
-      # RELEASE build + sign
-      - name: Build and Sign Release
-        if: steps.version.outputs.is_snapshot == 'false'
-        run: |
-          mvn -B -ntp clean install \
-            org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
-            -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
-            -Dgpg.pinentry.mode=loopback
-
-      # RELEASE publish
-      - name: Publish release to Maven Central
-        if: steps.version.outputs.is_snapshot == 'false'
-        run: |
-          mvn -B -ntp org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
+          mvn -B -ntp clean verify org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
+            -Pci-gpg \
             -DpublishingServerId=central \
             -DautoPublish=true \
             -DwaitUntil=published
