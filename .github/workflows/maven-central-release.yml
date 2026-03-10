@@ -78,7 +78,7 @@ jobs:
       - name: Build and Sign Release
         if: steps.version.outputs.is_snapshot == 'false'
         run: |
-          mvn -B -ntp clean verify \
+          mvn -B -ntp clean install \
             org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
             -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} \
             -Dgpg.pinentry.mode=loopback
