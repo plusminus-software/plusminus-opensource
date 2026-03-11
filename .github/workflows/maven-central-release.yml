@@ -6,6 +6,10 @@ on:
         required: false
         type: string
         default: "21"
+      module:
+        required: false
+        type: string
+        default: ""
     secrets:
       MAVEN_CENTRAL_USERNAME:
         required: true
@@ -60,8 +64,17 @@ jobs:
       - name: Deploy SNAPSHOT
         if: steps.version.outputs.is_snapshot == 'true'
         run: |
-          mvn -B -ntp clean deploy \
-            -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/
+          CMD="mvn -B -ntp clean deploy -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/"
+
+          # If the 'module' input is provided and not empty
+          if [ -n "${{ inputs.module }}" ]; then
+            echo "Targeting specific module: ${{ inputs.module }}"
+            # -pl: project list, -am: also make (build dependencies)
+            CMD="$CMD -pl ${{ inputs.module }} -am"
+          fi
+
+          # Execute the command
+          $CMD
 
       - name: Import GPG Key
         if: steps.version.outputs.is_snapshot == 'false'
@@ -70,14 +83,21 @@ jobs:
 
       - name: Publish Release
         if: steps.version.outputs.is_snapshot == 'false'
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          mvn -B -ntp clean package \
-            org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign \
-            org.sonatype.central:central-publishing-maven-plugin:0.7.0:publish \
-            -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
-            -Dgpg.arguments="--pinentry-mode=loopback" \
+          CMD="mvn -B -ntp clean deploy \
+            -Dgpg.passphrase=\"$GPG_PASSPHRASE\" \
+            -Dgpg.arguments='--pinentry-mode=loopback' \
             -Dgpg.attach=true \
             -DpublishingServerId=central \
             -DautoPublish=true \
             -DwaitUntil=published \
-            -DskipTests
+            -DskipTests"
+          
+          if [ -n "${{ inputs.module }}" ]; then
+            echo "Publishing specific module: ${{ inputs.module }}"
+            CMD="$CMD -pl ${{ inputs.module }} -am"
+          fi
+          
+          eval $CMD
