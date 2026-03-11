@@ -72,6 +72,7 @@ jobs:
         if: ${{ inputs.create-git-tag == true }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          MODULE="${{ inputs.module }}"
           
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
@@ -82,6 +83,11 @@ jobs:
             TAG="${VERSION}-${SHORT_SHA}"
           else
             TAG="$VERSION"
+          fi
+          
+          # Include module name if provided
+          if [ -n "$MODULE" ]; then
+            TAG="${MODULE}-${TAG}"
           fi
           
           echo "Tagging commit with: $TAG"
