@@ -10,6 +10,10 @@ on:
         required: false
         type: string
         default: ""
+      create-git-tag:
+        required: false
+        type: boolean
+        default: true
     secrets:
       MAVEN_CENTRAL_USERNAME:
         required: true
@@ -24,10 +28,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -60,6 +66,35 @@ jobs:
           else
             echo "is_snapshot=false" >> $GITHUB_OUTPUT
           fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Tag commit with Maven version
+        if: ${{ inputs.create-git-tag == true }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          # Determine tag
+          if [[ "$VERSION" == *-SNAPSHOT ]]; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG="${VERSION}-${SHORT_SHA}"
+          else
+            TAG="$VERSION"
+          fi
+          
+          echo "Tagging commit with: $TAG"
+          
+          # Skip if tag exists
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists. Skipping."
+            exit 0
+          fi
+          
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Deploy SNAPSHOT
         if: steps.version.outputs.is_snapshot == 'true'
