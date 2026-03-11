@@ -68,40 +68,6 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Tag commit with Maven version
-        if: ${{ inputs.create-git-tag == true }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          MODULE="${{ inputs.module }}"
-          
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          
-          # Determine tag
-          if [[ "$VERSION" == *-SNAPSHOT ]]; then
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            TAG="${VERSION}-${SHORT_SHA}"
-          else
-            TAG="$VERSION"
-          fi
-          
-          # Include module name if provided
-          if [ -n "$MODULE" ]; then
-            TAG="${MODULE}-${TAG}"
-          fi
-          
-          echo "Tagging commit with: $TAG"
-          
-          # Skip if tag exists
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists. Skipping."
-            exit 0
-          fi
-          
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
       - name: Deploy SNAPSHOT
         if: steps.version.outputs.is_snapshot == 'true'
         run: |
@@ -142,3 +108,37 @@ jobs:
           fi
           
           eval $CMD
+
+      - name: Tag commit with Maven version
+        if: ${{ inputs.create-git-tag == true }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          MODULE="${{ inputs.module }}"
+          
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          # Determine tag
+          if [[ "$VERSION" == *-SNAPSHOT ]]; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG="${VERSION}-${SHORT_SHA}"
+          else
+            TAG="$VERSION"
+          fi
+          
+          # Include module name if provided
+          if [ -n "$MODULE" ]; then
+            TAG="${MODULE}-${TAG}"
+          fi
+          
+          echo "Tagging commit with: $TAG"
+          
+          # Skip if tag exists
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists. Skipping."
+            exit 0
+          fi
+          
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
