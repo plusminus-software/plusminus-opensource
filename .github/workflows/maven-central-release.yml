@@ -93,14 +93,9 @@ jobs:
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          CMD="mvn -B -ntp clean deploy \
+          CMD="mvn -B -ntp clean deploy -Prelease \
             -Dgpg.passphrase=\"$GPG_PASSPHRASE\" \
-            -Dgpg.arguments='--pinentry-mode=loopback' \
-            -Dgpg.attach=true \
-            -DpublishingServerId=central \
-            -DautoPublish=true \
-            -DwaitUntil=published \
-            -DskipTests"
+            -Dgpg.arguments='--pinentry-mode=loopback'"
           
           if [ -n "${{ inputs.module }}" ]; then
             echo "Publishing specific module: ${{ inputs.module }}"
