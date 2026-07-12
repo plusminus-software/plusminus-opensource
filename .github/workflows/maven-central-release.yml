@@ -68,16 +68,72 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Resolve target modules
+        id: scope
+        env:
+          INPUT_MODULE: ${{ inputs.module }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # 1) An explicit module input always wins (manual, targeted release).
+          if [ -n "$INPUT_MODULE" ]; then
+            echo "Explicit module input: $INPUT_MODULE"
+            echo "modules=$INPUT_MODULE" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 2) Only auto-detect on push. Anything else -> build all (empty).
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "No module input and event is '$EVENT_NAME' -> building all modules"
+            echo "modules=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 3) Unknown/absent base commit (first push, force-push) -> build all.
+          if [ -z "$BASE_SHA" ] || [[ "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "Base commit '$BASE_SHA' unavailable -> building all modules"
+            echo "modules=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # 4) Root pom / build config / CI change affects everything -> build all.
+          if echo "$CHANGED" | grep -qE '^(pom\.xml|\.mvn/|\.github/)'; then
+            echo "Root or shared build files changed -> building all modules"
+            echo "modules=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 5) Map each changed top-level dir that is a Maven module (has pom.xml).
+          MODULES=$(echo "$CHANGED" | cut -d/ -f1 | sort -u | while read -r d; do
+            if [ -n "$d" ] && [ -f "$d/pom.xml" ]; then echo "$d"; fi
+          done | paste -sd, -)
+
+          # 6) Changes but none inside a module dir -> build all to be safe.
+          if [ -z "$MODULES" ]; then
+            echo "No changed Maven module directories matched -> building all modules"
+            echo "modules=" >> $GITHUB_OUTPUT
+          else
+            echo "Detected changed modules: $MODULES"
+            echo "modules=$MODULES" >> $GITHUB_OUTPUT
+          fi
+
       - name: Deploy SNAPSHOT
         if: steps.version.outputs.is_snapshot == 'true'
+        env:
+          MODULES: ${{ steps.scope.outputs.modules }}
         run: |
           CMD="mvn -B -ntp clean deploy -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/"
 
-          # If the 'module' input is provided and not empty
-          if [ -n "${{ inputs.module }}" ]; then
-            echo "Targeting specific module: ${{ inputs.module }}"
+          # If a module scope was resolved, limit the reactor to it.
+          if [ -n "$MODULES" ]; then
+            echo "Targeting modules: $MODULES"
             # -pl: project list, -am: also make (build dependencies)
-            CMD="$CMD -pl ${{ inputs.module }} -am"
+            CMD="$CMD -pl $MODULES -am"
           fi
 
           # Execute the command
@@ -92,16 +148,17 @@ jobs:
         if: steps.version.outputs.is_snapshot == 'false' && github.event_name == 'workflow_dispatch'
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MODULES: ${{ steps.scope.outputs.modules }}
         run: |
           CMD="mvn -B -ntp clean deploy -Prelease \
             -Dgpg.passphrase=\"$GPG_PASSPHRASE\" \
             -Dgpg.arguments='--pinentry-mode=loopback'"
-          
-          if [ -n "${{ inputs.module }}" ]; then
-            echo "Publishing specific module: ${{ inputs.module }}"
-            CMD="$CMD -pl ${{ inputs.module }} -am"
+
+          if [ -n "$MODULES" ]; then
+            echo "Publishing modules: $MODULES"
+            CMD="$CMD -pl $MODULES -am"
           fi
-          
+
           eval $CMD
 
       - name: Tag commit with Maven version
@@ -140,9 +197,10 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Publish job summary
+        env:
+          MODULES: ${{ steps.scope.outputs.modules }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          MODULE="${{ inputs.module }}"
           TAG="${{ steps.tag.outputs.tag }}"
           
           if [[ "${{ steps.version.outputs.is_snapshot }}" == "true" ]]; then
@@ -167,8 +225,10 @@ jobs:
           echo "- **Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
           echo "- **Type:** $TYPE" >> $GITHUB_STEP_SUMMARY
 
-          if [ -n "$MODULE" ]; then
-            echo "- **Module:** $MODULE" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$MODULES" ]; then
+            echo "- **Modules:** $MODULES" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Modules:** (all)" >> $GITHUB_STEP_SUMMARY
           fi
 
           if [[ "$SKIPPED" == "true" ]]; then
