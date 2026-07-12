@@ -105,7 +105,7 @@ jobs:
           eval $CMD
 
       - name: Tag commit with Maven version
-        if: ${{ inputs.create-git-tag == true && github.event_name == 'workflow_dispatch' }}
+        if: ${{ inputs.create-git-tag == true && (steps.version.outputs.is_snapshot == 'true' || github.event_name == 'workflow_dispatch') }}
         id: tag
         run: |
           VERSION="${{ steps.version.outputs.version }}"
