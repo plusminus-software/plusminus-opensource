@@ -84,12 +84,12 @@ jobs:
           $CMD
 
       - name: Import GPG Key
-        if: steps.version.outputs.is_snapshot == 'false'
+        if: steps.version.outputs.is_snapshot == 'false' && github.event_name == 'workflow_dispatch'
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
 
       - name: Publish Release
-        if: steps.version.outputs.is_snapshot == 'false'
+        if: steps.version.outputs.is_snapshot == 'false' && github.event_name == 'workflow_dispatch'
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
@@ -105,7 +105,7 @@ jobs:
           eval $CMD
 
       - name: Tag commit with Maven version
-        if: ${{ inputs.create-git-tag == true }}
+        if: ${{ inputs.create-git-tag == true && github.event_name == 'workflow_dispatch' }}
         id: tag
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -150,16 +150,32 @@ jobs:
           else
             TYPE="RELEASE"
           fi
-          
-          echo "## Maven Central Publish Result 🚀" >> $GITHUB_STEP_SUMMARY
+
+          # Release publish is skipped for non-SNAPSHOT versions on automatic (non-dispatch) runs
+          if [[ "${{ steps.version.outputs.is_snapshot }}" == "false" && "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            SKIPPED=true
+          else
+            SKIPPED=false
+          fi
+
+          if [[ "$SKIPPED" == "true" ]]; then
+            echo "## Maven Central Publish Skipped ⏭️" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Maven Central Publish Result 🚀" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
           echo "- **Type:** $TYPE" >> $GITHUB_STEP_SUMMARY
-          
+
           if [ -n "$MODULE" ]; then
             echo "- **Module:** $MODULE" >> $GITHUB_STEP_SUMMARY
           fi
-          
+
+          if [[ "$SKIPPED" == "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> ⚠️ **Not released.** A non-SNAPSHOT version is only published on a manual \`workflow_dispatch\` run. This was a \`${{ github.event_name }}\` run, so the release, GPG signing, and tagging steps were skipped." >> $GITHUB_STEP_SUMMARY
+          fi
+
           if [ -n "$TAG" ]; then
             echo "- **Git tag:** $TAG" >> $GITHUB_STEP_SUMMARY
           fi
