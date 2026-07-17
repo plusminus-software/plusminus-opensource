@@ -56,18 +56,6 @@ jobs:
           </settings>
           EOF
 
-      - name: Detect version
-        id: version
-        run: |
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout | tr -d '[:space:]')
-          echo "Project version: $VERSION"
-          if [[ "$VERSION" == *-SNAPSHOT ]]; then
-            echo "is_snapshot=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_snapshot=false" >> $GITHUB_OUTPUT
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Resolve target modules
         id: scope
         env:
@@ -122,120 +110,266 @@ jobs:
             echo "modules=$MODULES" >> $GITHUB_OUTPUT
           fi
 
-      - name: Deploy SNAPSHOT
-        if: steps.version.outputs.is_snapshot == 'true'
+      # Everything below works off a "release plan": one line per Maven project
+      # ("unit") with its version and the action to take for it. This lets the
+      # same deploy/tag/summary steps serve all supported repository layouts:
+      #   - reactor:    root pom.xml aggregates modules (units = reactor modules)
+      #   - single:     root pom.xml with no <modules>   (one unit: ".")
+      #   - standalone: no root pom.xml; every top-level dir with a pom.xml is an
+      #                 independent Maven project          (units = those dirs)
+      # Per unit: SNAPSHOT versions deploy on any trigger; non-SNAPSHOT versions
+      # deploy (signed) only on a manual workflow_dispatch run.
+      - name: Plan release
+        id: plan
         env:
           MODULES: ${{ steps.scope.outputs.modules }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          CMD="mvn -B -ntp clean deploy -DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/"
+          set -eo pipefail
+          PLAN="$RUNNER_TEMP/release-plan.tsv"
+          : > "$PLAN"
 
-          # If a module scope was resolved, limit the reactor to it.
+          if [ -f pom.xml ]; then MODE=reactor; else MODE=standalone; fi
+          echo "Repository layout: $MODE"
+
+          # Resolve the units to process (explicit/detected scope wins).
           if [ -n "$MODULES" ]; then
-            echo "Targeting modules: $MODULES"
-            # -pl: project list, -am: also make (build dependencies)
-            CMD="$CMD -pl $MODULES -am"
+            IFS=',' read -ra UNITS <<< "$MODULES"
+          elif [ "$MODE" == "reactor" ]; then
+            # Modules declared in the root pom; none -> single project at root.
+            mapfile -t UNITS < <(mvn -B -ntp -q help:evaluate -Dexpression=project.modules -DforceStdout \
+              | grep -oP '(?<=<string>)[^<]+' || true)
+            if [ ${#UNITS[@]} -eq 0 ]; then
+              UNITS=(.)
+            fi
+          else
+            # Alphabetical (glob) order so dependencies publish before their
+            # consumers (e.g. plusminus-configs before plusminus-parent).
+            UNITS=()
+            for d in */; do
+              d="${d%/}"
+              if [ -f "$d/pom.xml" ]; then
+                UNITS+=("$d")
+              fi
+            done
           fi
 
-          # Execute the command
-          $CMD
+          if [ ${#UNITS[@]} -eq 0 ]; then
+            echo "::error::No Maven projects found in this repository."
+            exit 1
+          fi
+
+          ANY_RELEASE=false
+          ANY_DEPLOY=false
+
+          published_on_central() { # $1=pom dir, $2=version -> 0 if this exact release version is on Central
+            local group artifact
+            group=$(mvn -B -ntp -q -f "$1/pom.xml" help:evaluate -Dexpression=project.groupId -DforceStdout | tr -d '[:space:]')
+            artifact=$(mvn -B -ntp -q -f "$1/pom.xml" help:evaluate -Dexpression=project.artifactId -DforceStdout | tr -d '[:space:]')
+            COORDS="$group:$artifact:$2"
+            curl -sf --max-time 15 -o /dev/null "https://repo1.maven.org/maven2/${group//.//}/${artifact}/$2/${artifact}-$2.pom"
+          }
+
+          plan_unit() { # $1=pom dir, $2=what to do if the release version is already on Central: fail|skip
+            local unit="$1" on_published="$2" version action
+            version=$(mvn -B -ntp -q -f "$unit/pom.xml" help:evaluate -Dexpression=project.version -DforceStdout | tr -d '[:space:]')
+            if [[ "$version" == *-SNAPSHOT ]]; then
+              action=deploy-snapshot
+              ANY_DEPLOY=true
+            elif [ "$EVENT_NAME" == "workflow_dispatch" ]; then
+              # Central never accepts the same release version twice, and one
+              # duplicate fails the whole upload. Check here, before anything
+              # is built or published.
+              if published_on_central "$unit" "$version"; then
+                if [ "$on_published" == "fail" ]; then
+                  echo "::error::$COORDS is already published on Maven Central. Bump the version and try again."
+                  exit 1
+                fi
+                action=skip-published
+              else
+                action=deploy-release
+                ANY_RELEASE=true
+                ANY_DEPLOY=true
+              fi
+            else
+              action=skip-release
+            fi
+            echo "$unit ($version) -> $action"
+            printf '%s\t%s\t%s\n' "$unit" "$version" "$action" >> "$PLAN"
+          }
+
+          # Reactor with modules: the root/parent pom must be published too, or
+          # consumers cannot resolve the modules that inherit from it. Snapshots
+          # re-upload freely; a parent release version already on Central is the
+          # normal "parent unchanged" case and is skipped, not an error.
+          if [ "$MODE" == "reactor" ] && [ "${UNITS[0]}" != "." ]; then
+            plan_unit . skip
+          fi
+
+          for UNIT in "${UNITS[@]}"; do
+            plan_unit "$UNIT" fail
+          done
+
+          {
+            echo "mode=$MODE"
+            echo "any_release=$ANY_RELEASE"
+            echo "any_deploy=$ANY_DEPLOY"
+          } >> "$GITHUB_OUTPUT"
+
+      # Reactor layouts: build and test ALL modules together (unit + integration
+      # tests) before anything is published, even when only some modules will be
+      # deployed. This catches a changed module breaking an unchanged one.
+      # `install` also puts every artifact into the local repository, so the
+      # scoped Deploy step below needs neither `-am` nor a second test run.
+      # (Standalone projects are independent — each one tests itself in Deploy.)
+      - name: Build and test all modules
+        if: steps.plan.outputs.mode == 'reactor' && steps.plan.outputs.any_deploy == 'true'
+        run: |
+          mvn -B -ntp clean install
 
       - name: Import GPG Key
-        if: steps.version.outputs.is_snapshot == 'false' && github.event_name == 'workflow_dispatch'
+        if: steps.plan.outputs.any_release == 'true'
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
 
-      - name: Publish Release
-        if: steps.version.outputs.is_snapshot == 'false' && github.event_name == 'workflow_dispatch'
+      - name: Deploy
+        if: steps.plan.outputs.any_deploy == 'true'
         env:
+          MODE: ${{ steps.plan.outputs.mode }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          MODULES: ${{ steps.scope.outputs.modules }}
         run: |
-          CMD="mvn -B -ntp clean deploy -Prelease \
-            -Dgpg.passphrase=\"$GPG_PASSPHRASE\" \
-            -Dgpg.arguments='--pinentry-mode=loopback'"
+          set -eo pipefail
+          PLAN="$RUNNER_TEMP/release-plan.tsv"
 
-          if [ -n "$MODULES" ]; then
-            echo "Publishing modules: $MODULES"
-            CMD="$CMD -pl $MODULES -am"
+          # deployAtEnd: upload only after every module in the invocation built
+          # successfully, so a late failure cannot leave a half-deployed set.
+          SNAPSHOT_FLAGS=(-DaltDeploymentRepository=central::default::https://central.sonatype.com/repository/maven-snapshots/ -DdeployAtEnd=true)
+          RELEASE_FLAGS=(-Prelease -Dgpg.passphrase="$GPG_PASSPHRASE" -Dgpg.arguments=--pinentry-mode=loopback)
+
+          if [ "$MODE" == "reactor" ]; then
+            # One reactor invocation per action type, scoped with -pl to the
+            # planned modules only. Tests already ran for the whole reactor in
+            # "Build and test all modules", so they are skipped here. No -am:
+            # it would pull dependency modules into the upload too (their
+            # artifacts are already in the local repository from `install`).
+            for ACTION in deploy-snapshot deploy-release; do
+              PL=$(awk -F'\t' -v a="$ACTION" '$3==a{print $1}' "$PLAN" | paste -sd, -)
+              if [ -z "$PL" ]; then continue; fi
+              if [ "$ACTION" == "deploy-snapshot" ]; then FLAGS=("${SNAPSHOT_FLAGS[@]}"); else FLAGS=("${RELEASE_FLAGS[@]}"); fi
+              echo "::group::Deploy ($ACTION): $PL"
+              if [ "$PL" == "." ]; then
+                mvn -B -ntp deploy -DskipTests "${FLAGS[@]}"
+              else
+                mvn -B -ntp deploy -DskipTests "${FLAGS[@]}" -pl "$PL"
+              fi
+              echo "::endgroup::"
+            done
+          else
+            # Standalone: each unit is its own Maven build.
+            while IFS=$'\t' read -r -u3 UNIT VERSION ACTION; do
+              case "$ACTION" in
+                deploy-snapshot) FLAGS=("${SNAPSHOT_FLAGS[@]}") ;;
+                deploy-release)  FLAGS=("${RELEASE_FLAGS[@]}") ;;
+                *) echo "Skipping $UNIT ($VERSION): non-SNAPSHOT publish requires workflow_dispatch."; continue ;;
+              esac
+              echo "::group::Deploy $UNIT ($VERSION)"
+              mvn -B -ntp -f "$UNIT/pom.xml" clean deploy "${FLAGS[@]}"
+              echo "::endgroup::"
+            done 3< "$PLAN"
           fi
 
-          eval $CMD
-
-      - name: Tag commit with Maven version
-        if: ${{ inputs.create-git-tag == true && (steps.version.outputs.is_snapshot == 'true' || github.event_name == 'workflow_dispatch') }}
-        id: tag
+      - name: Tag released versions
+        if: inputs.create-git-tag == true && steps.plan.outputs.any_deploy == 'true'
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+          SCOPE: ${{ steps.scope.outputs.modules }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          MODULE="${{ inputs.module }}"
-          
+          set -eo pipefail
+          PLAN="$RUNNER_TEMP/release-plan.tsv"
+          TAGS="$RUNNER_TEMP/release-tags.txt"
+          : > "$TAGS"
+
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          
-          # Determine tag
-          if [[ "$VERSION" == *-SNAPSHOT ]]; then
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            TAG="${VERSION}-${SHORT_SHA}"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+
+          tag_name() { # $1=version -> releases tag as-is, snapshots get the commit sha
+            if [[ "$1" == *-SNAPSHOT ]]; then echo "$1-$SHORT_SHA"; else echo "$1"; fi
+          }
+
+          create_tag() {
+            if git rev-parse -q --verify "refs/tags/$1" >/dev/null; then
+              echo "Tag $1 already exists. Skipping."
+            else
+              git tag -a "$1" -m "Release $1"
+              git push origin "$1"
+              echo "Tagged: $1"
+            fi
+            echo "$1" >> "$TAGS"
+          }
+
+          DEPLOYED="$RUNNER_TEMP/release-deployed.tsv"
+          awk -F'\t' '$3 ~ /^deploy-/' "$PLAN" > "$DEPLOYED"
+
+          # The reactor root/parent pom is deployed as infrastructure for its
+          # modules — it does not deserve a tag of its own next to theirs.
+          if [ "$(wc -l < "$DEPLOYED")" -gt 1 ]; then
+            grep -v $'^\\.\t' "$DEPLOYED" > "$DEPLOYED.tmp" && mv "$DEPLOYED.tmp" "$DEPLOYED"
+          fi
+
+          UNIQ_VERSIONS=$(cut -f2 "$DEPLOYED" | sort -u | wc -l)
+
+          # A full reactor build where every deployed module shares one version
+          # gets a single unprefixed tag (classic multimodule release). Anything
+          # else gets one module-prefixed tag per deployed unit, so independent
+          # projects (and mixed-version reactors) never collide.
+          if [ "$MODE" == "reactor" ] && [ -z "$SCOPE" ] && [ "$UNIQ_VERSIONS" -eq 1 ]; then
+            create_tag "$(tag_name "$(cut -f2 "$DEPLOYED" | head -n1)")"
           else
-            TAG="$VERSION"
+            while IFS=$'\t' read -r -u3 UNIT VERSION ACTION; do
+              TAG=$(tag_name "$VERSION")
+              if [ "$UNIT" != "." ]; then TAG="${UNIT}-${TAG}"; fi
+              create_tag "$TAG"
+            done 3< "$DEPLOYED"
           fi
-          
-          # Include module name if provided
-          if [ -n "$MODULE" ]; then
-            TAG="${MODULE}-${TAG}"
-          fi
-          
-          echo "Tagging commit with: $TAG"
-          
-          # Skip if tag exists
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists. Skipping."
-            exit 0
-          fi
-          
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Publish job summary
         env:
-          MODULES: ${{ steps.scope.outputs.modules }}
+          ANY_DEPLOY: ${{ steps.plan.outputs.any_deploy }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.tag.outputs.tag }}"
-          
-          if [[ "${{ steps.version.outputs.is_snapshot }}" == "true" ]]; then
-            TYPE="SNAPSHOT"
+          set -eo pipefail
+          PLAN="$RUNNER_TEMP/release-plan.tsv"
+          TAGS="$RUNNER_TEMP/release-tags.txt"
+
+          if [ "$ANY_DEPLOY" == "true" ]; then
+            echo "## Maven Central Publish Result 🚀" >> "$GITHUB_STEP_SUMMARY"
           else
-            TYPE="RELEASE"
+            echo "## Maven Central Publish Skipped ⏭️" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Project | Version | Type | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          ANY_SKIPPED=false
+          while IFS=$'\t' read -r -u3 UNIT VERSION ACTION; do
+            NAME=$UNIT
+            if [ "$UNIT" == "." ]; then NAME="(root)"; fi
+            case "$ACTION" in
+              deploy-snapshot) TYPE=SNAPSHOT; STATUS=published ;;
+              deploy-release)  TYPE=RELEASE;  STATUS=published ;;
+              skip-published)  TYPE=RELEASE;  STATUS="already on Central" ;;
+              *)               TYPE=RELEASE;  STATUS=skipped; ANY_SKIPPED=true ;;
+            esac
+            echo "| \`$NAME\` | $VERSION | $TYPE | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          done 3< "$PLAN"
+
+          if [ -s "$TAGS" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Git tags:** $(paste -sd, "$TAGS" | sed 's/,/, /g')" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # Release publish is skipped for non-SNAPSHOT versions on automatic (non-dispatch) runs
-          if [[ "${{ steps.version.outputs.is_snapshot }}" == "false" && "${{ github.event_name }}" != "workflow_dispatch" ]]; then
-            SKIPPED=true
-          else
-            SKIPPED=false
-          fi
-
-          if [[ "$SKIPPED" == "true" ]]; then
-            echo "## Maven Central Publish Skipped ⏭️" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## Maven Central Publish Result 🚀" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
-          echo "- **Type:** $TYPE" >> $GITHUB_STEP_SUMMARY
-
-          if [ -n "$MODULES" ]; then
-            echo "- **Modules:** $MODULES" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- **Modules:** (all)" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if [[ "$SKIPPED" == "true" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> ⚠️ **Not released.** A non-SNAPSHOT version is only published on a manual \`workflow_dispatch\` run. This was a \`${{ github.event_name }}\` run, so the release, GPG signing, and tagging steps were skipped." >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if [ -n "$TAG" ]; then
-            echo "- **Git tag:** $TAG" >> $GITHUB_STEP_SUMMARY
+          if [ "$ANY_SKIPPED" == "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ⚠️ Non-SNAPSHOT versions are only published on a manual \`workflow_dispatch\` run. This was a \`$EVENT_NAME\` run, so those projects were skipped (no publish, GPG signing, or tag)." >> "$GITHUB_STEP_SUMMARY"
           fi
