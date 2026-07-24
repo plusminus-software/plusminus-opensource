@@ -42,6 +42,9 @@ jobs:
           java-version: ${{ inputs.java-version }}
 
       - name: Configure Maven settings
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
         run: |
           mkdir -p ~/.m2
           cat > ~/.m2/settings.xml <<EOF
@@ -49,8 +52,8 @@ jobs:
             <servers>
               <server>
                 <id>central</id>
-                <username>${{ secrets.MAVEN_CENTRAL_USERNAME }}</username>
-                <password>${{ secrets.MAVEN_CENTRAL_PASSWORD }}</password>
+                <username>${MAVEN_CENTRAL_USERNAME}</username>
+                <password>${MAVEN_CENTRAL_PASSWORD}</password>
               </server>
             </servers>
           </settings>
@@ -162,12 +165,20 @@ jobs:
           ANY_RELEASE=false
           ANY_DEPLOY=false
 
-          published_on_central() { # $1=pom dir, $2=version -> 0 if this exact release version is on Central
+          # Echo "group:artifact:version" for a unit. Kept separate so callers get the coords
+          # as a return value instead of relying on a global side effect.
+          coords() { # $1=pom dir, $2=version -> "group:artifact:version"
             local group artifact
             group=$(mvn -B -ntp -q -f "$1/pom.xml" help:evaluate -Dexpression=project.groupId -DforceStdout | tr -d '[:space:]')
             artifact=$(mvn -B -ntp -q -f "$1/pom.xml" help:evaluate -Dexpression=project.artifactId -DforceStdout | tr -d '[:space:]')
-            COORDS="$group:$artifact:$2"
-            curl -sf --max-time 15 -o /dev/null "https://repo1.maven.org/maven2/${group//.//}/${artifact}/$2/${artifact}-$2.pom"
+            printf '%s:%s:%s' "$group" "$artifact" "$2"
+          }
+
+          published_on_central() { # $1=group:artifact:version -> 0 if this exact release version is on Central
+            local group artifact version
+            IFS=':' read -r group artifact version <<< "$1"
+            curl -sf --max-time 15 -o /dev/null \
+              "https://repo1.maven.org/maven2/${group//.//}/${artifact}/${version}/${artifact}-${version}.pom"
           }
 
           plan_unit() { # $1=pom dir, $2=what to do if the release version is already on Central: fail|skip
@@ -180,9 +191,11 @@ jobs:
               # Central never accepts the same release version twice, and one
               # duplicate fails the whole upload. Check here, before anything
               # is built or published.
-              if published_on_central "$unit" "$version"; then
+              local unit_coords
+              unit_coords=$(coords "$unit" "$version")
+              if published_on_central "$unit_coords"; then
                 if [ "$on_published" == "fail" ]; then
-                  echo "::error::$COORDS is already published on Maven Central. Bump the version and try again."
+                  echo "::error::$unit_coords is already published on Maven Central. Bump the version and try again."
                   exit 1
                 fi
                 action=skip-published
@@ -229,8 +242,10 @@ jobs:
 
       - name: Import GPG Key
         if: steps.plan.outputs.any_release == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
       - name: Deploy
         if: steps.plan.outputs.any_deploy == 'true'
